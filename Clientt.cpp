@@ -9,11 +9,13 @@
 #include <stdio.h>
 #include <iostream>
 #include <cstring>
+#include <cstdint> // for uintptr_t
 #define _WINSOCK_DEPRECATED_NO_WARNINGS
 #include <winsock.h>
 #pragma comment(lib, "WS2_32.lib")
 #include <boost/property_tree/ptree.hpp>
 #include <boost/property_tree/json_parser.hpp>
+#include <thread>
 
 namespace pt = boost::property_tree;
 using namespace std;
@@ -42,8 +44,10 @@ void sendRequest(SOCKET serverSocket, const pt::ptree& request) {
     pt::write_json(ss, request);
     string requestStr = ss.str();
     // Send request to server
-    if (::send(serverSocket, requestStr.c_str(), requestStr.length(), 0) < 0) {
-        cerr << "Error sending request to server\n";
+    int bytesSent = ::send(serverSocket, requestStr.c_str(), requestStr.length(), 0);
+    if (bytesSent == SOCKET_ERROR) {
+        cerr << "Error sending request to server: " << WSAGetLastError() << endl;
+        // Handle the error, such as closing the socket or returning an error code
     }
 }
 
@@ -51,9 +55,13 @@ void sendRequest(SOCKET serverSocket, const pt::ptree& request) {
 // Function to receive response from server
 pt::ptree receiveResponse(int serverSocket) {
     // Receive response from server
-    char buffer[1024] = { 0 };
-    if (::recv(serverSocket, buffer, sizeof(buffer), 0) < 0) {
-        cerr << "Error receiving response from server\n";
+    char buffer[2048] = { 0 };
+    int bytesReceived = ::recv(serverSocket, buffer, sizeof(buffer), 0);
+    if (bytesReceived == SOCKET_ERROR) {
+        cerr << "Error receiving response from server: " << WSAGetLastError() << endl;
+        // Handle the error, such as closing the socket or returning an error code
+        // For simplicity, we'll throw an exception here
+        throw std::runtime_error("Error receiving response from server");
     }
     // Parse response as PropertyTree
     pt::ptree response;
@@ -62,6 +70,7 @@ pt::ptree receiveResponse(int serverSocket) {
     return response;
 }
 
+// Function to listen for incoming messages from other users
 
 
 
@@ -93,6 +102,7 @@ int main() {
         return 1;
     }
 
+    string username;
     // Display welcome message and menu options
     cout << "Welcome to My Chat Application!" << endl;
     cout << "Choose an option:" << endl;
@@ -109,18 +119,15 @@ int main() {
         case 1: {
             cout << "You chose to sign up." << endl;
             // Get user input for sign-up (e.g., username, email, password)
-            string username, email, password;
+            string password;
             cout << "Enter username: ";
             cin >> username;
-            cout << "Enter email: ";
-            cin >> email;
             cout << "Enter password: ";
             cin >> password;
             // Create sign-up request
             pt::ptree signupRequest;
-            signupRequest.put("action", "signup");
+            signupRequest.put("command", "create_account");
             signupRequest.put("username", username);
-            signupRequest.put("email", email);
             signupRequest.put("password", password);
             // Send sign-up request to server
             sendRequest(clientSocket, signupRequest);
@@ -132,14 +139,14 @@ int main() {
         case 2: {
             cout << "You chose to sign in." << endl;
             // Get user input for sign-in (e.g., username, password)
-            string username, password;
+            string password;
             cout << "Enter username: ";
             cin >> username;
             cout << "Enter password: ";
             cin >> password;
             // Create sign-in request
             pt::ptree signinRequest;
-            signinRequest.put("action", "signin");
+            signinRequest.put("command", "authenticate");
             signinRequest.put("username", username);
             signinRequest.put("password", password);
             // Send sign-in request to server
@@ -165,15 +172,14 @@ int main() {
 
         // Continue with live chat functionality after authentication
         string receiver;
-        string username;
+        
         while (true) {
             cout << "Enter receiver's username (or type 'exit' to quit chat): ";
             cin >> receiver;
             if (receiver == "exit") break;
             string message;
             cout << "Enter message: ";
-            cin.ignore(); // Clear input buffer
-            getline(cin, message);
+            cin >> message;
             // Encrypt message using Caesar cipher
             int key = 3; // Caesar cipher key
             string encryptedMessage = encryptMessage(message, key);
@@ -188,11 +194,24 @@ int main() {
             // Receive and process response from server
             pt::ptree chatMessageResponse = receiveResponse(clientSocket);
             cout << "Chat message response from server: " << chatMessageResponse.get<string>("status") << endl;
+
+            // Receive messages from other users
+            pt::ptree receivedMessage = receiveResponse(clientSocket);
+            if (receivedMessage.get<string>("command") == "chat_message") {
+                string sender = receivedMessage.get<string>("sender");
+                string receivedEncryptedMessage = receivedMessage.get<string>("message");
+                // Decrypt received message
+                string receivedMessage = decryptMessage(receivedEncryptedMessage, key);
+                cout << "Message from " << sender << ": " << receivedMessage << endl;
+            }
         }
 
     }
     catch (const std::exception& e) {
         cerr << "Exception caught: " << e.what() << endl;
+    }
+    catch (const boost::exception& e) {
+        cerr << "Exception caught: "  << endl;
     }
     // Receive data from the server
     char buffer[1024] = { 0 };
