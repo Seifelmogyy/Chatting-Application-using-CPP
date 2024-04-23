@@ -4,9 +4,10 @@
 //
 //  Created by Seif elmougy on 17/04/2024.
 //
-
+# define BOOST_EXCEPTION_DISABLE
 #include <stdio.h>
 #include <iostream>
+
 #define _WINSOCK_DEPRECATED_NO_WARNINGS
 #include <winsock.h>
 #pragma comment(lib, "WS2_32.lib")
@@ -17,6 +18,14 @@
 #include <thread>
 
 using namespace std;
+
+size_t hashPassword(const string& password) {
+    size_t hash = 0;
+    for (char c : password) {
+        hash += c;
+    }
+    return hash;
+}
 
 // Caesar Cipher Encryption and Decryption Functions
 string encryptMessage(const std::string& message, int key) {
@@ -106,8 +115,9 @@ void sendResponse(SOCKET clientSocket, const pt::ptree& response) {
 void handleAccountCreation(SOCKET clientSocket, const pt::ptree& request) {
     string username = request.get<string>("username");
     string password = request.get<string>("password");
+    size_t hashedPassword = hashPassword(password); // Hash the password
+
     // Hash the password securely using a cryptographic hash function (e.g., SHA-256)
-    string hashedPassword = "hashed_password"; // Placeholder for actual hashing
     if (!isUsernameAvailable(username)) {
         pt::ptree response;
         response.put("status", "failure");
@@ -115,10 +125,10 @@ void handleAccountCreation(SOCKET clientSocket, const pt::ptree& request) {
         sendResponse(clientSocket, response);
     }
     else {
-        storeCredentials(username, hashedPassword);
+        storeCredentials(username,to_string(hashedPassword));
         User user;
         user.username = username;
-        user.password = password; // Store password in memory for simplicity
+        user.password = to_string(hashedPassword); // Store password in memory for simplicity
         user.online = false;
         user.socket = clientSocket;
         users[username] = user;
@@ -133,10 +143,13 @@ void handleAccountCreation(SOCKET clientSocket, const pt::ptree& request) {
 void handleAuthentication(SOCKET clientSocket, const pt::ptree& request) {
     string username = request.get<string>("username");
     string password = request.get<string>("password");
-    string storedHashedPassword = getHashedPassword(username);
-    // Hash the provided password
-    string hashedPassword = "hashed_password"; // Placeholder for actual hashing
-    if (storedHashedPassword == hashedPassword) {
+    size_t hashedPassword = hashPassword(password); // Hash the provided password    
+
+    string storedHashedPassword;
+    if (users.find(username) != users.end()) {
+        storedHashedPassword = users[username].password;
+    }
+    if (to_string(hashedPassword) == storedHashedPassword) {
         // Mark user as online
         users[username].online = true;
         users[username].socket = clientSocket;
@@ -163,14 +176,27 @@ void handleChatMessage(SOCKET clientSocket, const pt::ptree& request) {
         // Encrypt message using Caesar cipher
         int key = 3; // Caesar cipher key
         string encryptedMessage = encryptMessage(message, key);
-        // Prepare response
         pt::ptree response;
         response.put("status", "success");
-        response.put("sender", sender);
-        response.put("receiver", receiver);
-        response.put("message", encryptedMessage);
+        response.put("message", "Authentication successful");
+        sendResponse(clientSocket, response);
+
+        // Prepare response
+        pt::ptree responsetoreceiver;
+        responsetoreceiver.put("status", "success");
+        responsetoreceiver.put("sender", sender);
+        responsetoreceiver.put("receiver", receiver);
+        responsetoreceiver.put("message", encryptedMessage);
         // Send encrypted message to receiver
-        sendResponse(users[receiver].socket, response);
+        sendResponse(users[receiver].socket, responsetoreceiver);
+
+        pt::ptree responseToSender;
+        responseToSender.put("status", "success");
+        responseToSender.put("sender", sender);
+        responseToSender.put("receiver", receiver);
+        responseToSender.put("message", encryptedMessage);
+        // Send encrypted message to sender
+        sendResponse(clientSocket, responseToSender);
     }
     else {
         pt::ptree response;
@@ -180,15 +206,58 @@ void handleChatMessage(SOCKET clientSocket, const pt::ptree& request) {
     }
 }
 
-// Function to handle client requests
-void handleClientRequest(SOCKET clientSocket) {
-    // Receive data from the client
+// Function to receive chat messages from clients
+void receiveChatMessage(SOCKET clientSocket) {
+    // Receive message from client
     char buffer[1024] = { 0 };
-    recv(clientSocket, buffer, sizeof(buffer), 0);
-    // Parse received data as PropertyTree
+    int bytesReceived = recv(clientSocket, buffer, sizeof(buffer), 0);
+    if (bytesReceived <= 0) {
+        cerr << "Error receiving message from client" << endl;
+        return;
+    }
+
+    // Parse received message as PropertyTree
     pt::ptree request;
     stringstream ss(buffer);
     pt::read_json(ss, request);
+
+    // Handle the received message
+    handleChatMessage(clientSocket, request);
+}
+
+// Function to handle client requests
+void handleClientRequest(SOCKET clientSocket) {
+    // Receive data from the client
+    char buffer[2048] = { 0 };
+    // Receive data from the client
+    int bytesReceived = recv(clientSocket, buffer, sizeof(buffer), 0);
+    if (bytesReceived == SOCKET_ERROR) {
+        cerr << "Error receiving data from client: " << WSAGetLastError() << endl;
+        closesocket(clientSocket);
+        return;
+    }
+    // Check for empty request
+    if (bytesReceived == 0) {
+        cerr << "Empty request received from client" << endl;
+        closesocket(clientSocket);
+        return;
+    }    
+    // Parse received data as PropertyTree
+    pt::ptree request;
+    stringstream ss(buffer);
+    try {
+        pt::read_json(ss, request);
+    }
+    catch (const pt::json_parser_error& e) {
+        cerr << "Error parsing JSON data from client: " << e.what() << endl;
+        // Send an error response to the client
+        pt::ptree response;
+        response.put("status", "failure");
+        response.put("message", "Invalid JSON data received");
+        sendResponse(clientSocket, response);
+        closesocket(clientSocket);
+        return;
+    }
     // Handle different types of requests
     string command = request.get<string>("command");
     if (command == "create_account") {
